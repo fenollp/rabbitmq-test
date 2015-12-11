@@ -736,21 +736,22 @@ test_log_management() ->
     %% prepare basic logs
     file:delete([MainLog, Suffix]),
     file:delete([SaslLog, Suffix]),
-
+    ok = test_logs_working(MainLog, SaslLog),
     %% simple logs reopening
     ok = control_action(rotate_logs, []),
-    [true, true] = empty_files([MainLog, SaslLog]),
+    [true, true] = empty_or_nonexist_files([MainLog, SaslLog]),
     ok = test_logs_working(MainLog, SaslLog),
 
     %% simple log rotation
     ok = control_action(rotate_logs, [Suffix]),
     [true, true] = non_empty_files([[MainLog, Suffix], [SaslLog, Suffix]]),
-    [true, true] = empty_files([MainLog, SaslLog]),
+    [true, true] = empty_or_nonexist_files([MainLog, SaslLog]),
     ok = test_logs_working(MainLog, SaslLog),
 
     %% reopening logs with log rotation performed first
     ok = clean_logs([MainLog, SaslLog], Suffix),
     ok = control_action(rotate_logs, []),
+    timer:sleep(100),
     ok = file:rename(MainLog, [MainLog, Suffix]),
     ok = file:rename(SaslLog, [SaslLog, Suffix]),
     ok = test_logs_working([MainLog, Suffix], [SaslLog, Suffix]),
@@ -761,7 +762,7 @@ test_log_management() ->
     ok = clean_logs([MainLog, SaslLog], Suffix),
     ok = control_action(rotate_logs, []),
     ok = control_action(rotate_logs, [Suffix]),
-    [false, true] = empty_files([[MainLog, Suffix], [SaslLog, Suffix]]),
+    [false, true] = empty_or_nonexist_files([[MainLog, Suffix], [SaslLog, Suffix]]),
 
     %% logs with suffix are not writable
     ok = control_action(rotate_logs, [Suffix]),
@@ -774,25 +775,41 @@ test_log_management() ->
     ok = control_action(rotate_logs, []),
 
     %% logging directed to tty (first, remove handlers)
-    ok = delete_log_handlers([rabbit_sasl_report_file_h,
-                              rabbit_error_logger_file_h]),
     ok = clean_logs([MainLog, SaslLog], Suffix),
-    ok = application:set_env(rabbit, sasl_error_logger, tty),
+
+
+    ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, tty),
-    ok = control_action(rotate_logs, []),
+    ok = application:set_env(rabbit, sasl_error_logger, tty),
+    application:unset_env(lager, handlers),
+    ok = control_action(start_app, []),
+    file:delete(MainLog),
+    file:delete(SaslLog),
+    timer:sleep(200),
+    rabbit_log:info("test info"),
+    error_logger:info_msg("test info"),
     [{error, enoent}, {error, enoent}] = empty_files([MainLog, SaslLog]),
 
     %% rotate logs when logging is turned off
     ok = application:set_env(rabbit, sasl_error_logger, false),
     ok = application:set_env(rabbit, error_logger, silent),
-    ok = control_action(rotate_logs, []),
+    application:unset_env(lager, handlers),
+    ok = control_action(stop_app, []),
+    ok = control_action(start_app, []),
+    file:delete(MainLog),
+    file:delete(SaslLog),
+    timer:sleep(200),
+    rabbit_log:error("test error"),
+    error_logger:error_msg("test error"),
+    timer:sleep(200),
     [{error, enoent}, {error, enoent}] = empty_files([MainLog, SaslLog]),
 
     %% cleanup
     ok = application:set_env(rabbit, sasl_error_logger, {file, SaslLog}),
     ok = application:set_env(rabbit, error_logger, {file, MainLog}),
-    ok = add_log_handlers([{rabbit_error_logger_file_h, MainLog},
-                           {rabbit_sasl_report_file_h, SaslLog}]),
+    application:unset_env(lager, handlers),
+    ok = control_action(stop_app, []),
+    ok = control_action(start_app, []),
     passed.
 
 test_log_management_during_startup() ->
@@ -803,21 +820,8 @@ test_log_management_during_startup() ->
     ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, tty),
     ok = application:set_env(rabbit, sasl_error_logger, tty),
-    ok = add_log_handlers([{error_logger_tty_h, []},
-                           {sasl_report_tty_h, []}]),
+    application:unset_env(lager, handlers),
     ok = control_action(start_app, []),
-
-    %% start application with tty logging and
-    %% proper handlers not installed
-    ok = control_action(stop_app, []),
-    ok = error_logger:tty(false),
-    ok = delete_log_handlers([sasl_report_tty_h]),
-    ok = case catch control_action(start_app, []) of
-             ok -> exit({got_success_but_expected_failure,
-                         log_rotation_tty_no_handlers_test});
-             {badrpc, {'EXIT', {error,
-                                {cannot_log_to_tty, _, not_installed}}}} -> ok
-         end,
 
     %% fix sasl logging
     ok = application:set_env(rabbit, sasl_error_logger, {file, SaslLog}),
@@ -827,18 +831,15 @@ test_log_management_during_startup() ->
     delete_file(TmpLog),
     ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, {file, TmpLog}),
-
-    ok = delete_log_handlers([rabbit_error_logger_file_h]),
-    ok = add_log_handlers([{error_logger_file_h, MainLog}]),
+    application:unset_env(lager, handlers),
     ok = control_action(start_app, []),
 
     %% start application with logging to directory with no
     %% write permissions
     ok = control_action(stop_app, []),
     TmpDir = "/tmp/rabbit-tests",
+    ok = file:delete(TmpLog),
     ok = set_permissions(TmpDir, 8#00400),
-    ok = delete_log_handlers([rabbit_error_logger_file_h]),
-    ok = add_log_handlers([{error_logger_file_h, MainLog}]),
     ok = case control_action(start_app, []) of
              ok -> exit({got_success_but_expected_failure,
                          log_rotation_no_write_permission_dir_test});
@@ -851,31 +852,27 @@ test_log_management_during_startup() ->
     ok = control_action(stop_app, []),
     TmpTestDir = "/tmp/rabbit-tests/no-permission/test/log",
     ok = application:set_env(rabbit, error_logger, {file, TmpTestDir}),
-    ok = add_log_handlers([{error_logger_file_h, MainLog}]),
+    application:unset_env(lager, handlers),
     ok = case control_action(start_app, []) of
              ok -> exit({got_success_but_expected_failure,
                          log_rotatation_parent_dirs_test});
              {badrpc,
               {'EXIT',
-               {error, {cannot_log_to_file, _,
-                        {error,
-                         {cannot_create_parent_dirs, _, eacces}}}}}} -> ok
+               {error, {cannot_create_parent_dirs, _, eacces}}}} -> ok
          end,
     ok = set_permissions(TmpDir, 8#00700),
-    ok = set_permissions(TmpLog, 8#00600),
-    ok = delete_file(TmpLog),
     ok = file:del_dir(TmpDir),
 
     %% start application with standard error_logger_file_h
     %% handler not installed
-    ok = control_action(stop_app, []),
+    % ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, {file, MainLog}),
+    application:unset_env(lager, handlers),
     ok = control_action(start_app, []),
 
     %% start application with standard sasl handler not installed
     %% and rabbit main log handler installed correctly
     ok = control_action(stop_app, []),
-    ok = delete_log_handlers([rabbit_sasl_report_file_h]),
     ok = control_action(start_app, []),
     passed.
 
@@ -1917,6 +1914,13 @@ check_parse_arguments(ExpRes, Fun, As) ->
 
     true = SortRes(ExpRes) =:= SortRes(Fun(As)).
 
+empty_or_nonexist_files(Files) ->
+    [case file:read_file_info(File) of
+         {ok, FInfo} -> FInfo#file_info.size == 0;
+         {error, enoent} -> true;
+         Error       -> Error
+     end || File <- Files].
+
 empty_files(Files) ->
     [case file:read_file_info(File) of
          {ok, FInfo} -> FInfo#file_info.size == 0;
@@ -1933,7 +1937,7 @@ test_logs_working(MainLogFile, SaslLogFile) ->
     ok = rabbit_log:error("foo bar"),
     ok = error_logger:error_report(crash_report, [foo, bar]),
     %% give the error loggers some time to catch up
-    timer:sleep(100),
+    timer:sleep(200),
     [true, true] = non_empty_files([MainLogFile, SaslLogFile]),
     ok.
 
