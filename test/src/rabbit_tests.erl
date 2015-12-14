@@ -858,7 +858,8 @@ test_log_management_during_startup() ->
                          log_rotatation_parent_dirs_test});
              {badrpc,
               {'EXIT',
-               {error, {cannot_create_parent_dirs, _, eacces}}}} -> ok
+               {error, {cannot_log_to_file, _, 
+                            {cannot_create_parent_dirs, _, eacces}}}}} -> ok
          end,
     ok = set_permissions(TmpDir, 8#00700),
     ok = file:del_dir(TmpDir),
